@@ -19,6 +19,7 @@ import type {
 import { toDonationSummaryItems } from "@/lib/validation/donation";
 import { logAuditEvent } from "@/services/audit/log-event";
 import { logCommunicationEvent } from "@/services/communications/log-event";
+import { sendDonationNotificationEmail } from "@/services/donations/send-donation-notification-email";
 
 const PHOTO_PENDING_NOTE =
   "Photos pending — coordinator will follow up to collect images.";
@@ -108,7 +109,7 @@ export async function createDonationFromPublicForm(
   });
 
   try {
-    return await db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
       const [existingUser] = await runDonationDbStep(
         "users.select_by_email",
         () =>
@@ -348,6 +349,15 @@ export async function createDonationFromPublicForm(
         donorName: `${donor.firstName} ${donor.lastName}`,
       };
     });
+
+    await sendDonationNotificationEmail({
+      donorName: result.donorName,
+      donor: input.donor,
+      items: input.items,
+      itemIds: result.itemIds,
+    });
+
+    return result;
   } catch (error) {
     logDonationError("createDonationFromPublicForm transaction failed", error, {
       itemCount: input.items.length,
