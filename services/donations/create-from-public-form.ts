@@ -9,6 +9,7 @@ import {
 import { userRoles } from "@/db/schema/user-roles";
 import { users } from "@/db/schema/users";
 import { DONOR_ROLE_ID } from "@/lib/auth/constants";
+import { logDonationError } from "@/lib/logging/donation-submission";
 import { CLOTHING_CATEGORY } from "@/lib/validation/clothing";
 import type {
   DonationItemInput,
@@ -71,6 +72,22 @@ function itemCategoryLabel(item: DonationItemInput): string {
   return item.category;
 }
 
+async function runDonationDbStep<T>(
+  step: string,
+  operation: () => Promise<T>,
+  context?: Record<string, unknown>,
+): Promise<T> {
+  console.error(`[donate] db step:start ${step}`, context ?? {});
+  try {
+    const result = await operation();
+    console.error(`[donate] db step:ok ${step}`);
+    return result;
+  } catch (error) {
+    logDonationError(`db step:failed ${step}`, error, context);
+    throw error;
+  }
+}
+
 export type CreateDonationResult = {
   userId: string;
   itemIds: string[];
@@ -84,177 +101,257 @@ export async function createDonationFromPublicForm(
   const db = getDb();
   const donor = input.donor;
 
-  return db.transaction(async (tx) => {
-    const [existingUser] = await tx
-      .select()
-      .from(users)
-      .where(
-        and(
-          sql`lower(${users.email}) = ${donor.email}`,
-          isNull(users.deletedAt),
-        ),
-      )
-      .limit(1);
+  console.error("[donate] createDonationFromPublicForm started", {
+    itemCount: input.items.length,
+    zipCode: donor.zipCode,
+    state: donor.state,
+  });
 
-    let userId: string;
-    let donorProfileId: string;
+  try {
+    return await db.transaction(async (tx) => {
+      const [existingUser] = await runDonationDbStep(
+        "users.select_by_email",
+        () =>
+          tx
+            .select()
+            .from(users)
+            .where(
+              and(
+                sql`lower(${users.email}) = ${donor.email}`,
+                isNull(users.deletedAt),
+              ),
+            )
+            .limit(1),
+      );
 
-    if (existingUser) {
-      userId = existingUser.id;
+      let userId: string;
+      let donorProfileId: string;
 
-      await tx
-        .update(users)
-        .set({
-          firstName: donor.firstName,
-          lastName: donor.lastName,
-          phone: donor.phone ?? existingUser.phone,
-          updatedAt: new Date(),
-        })
-        .where(eq(users.id, userId));
+      if (existingUser) {
+        userId = existingUser.id;
 
-      const [existingProfile] = await tx
-        .select()
-        .from(donorProfiles)
-        .where(eq(donorProfiles.userId, userId))
-        .limit(1);
+        await runDonationDbStep(
+          "users.update_existing",
+          () =>
+            tx
+              .update(users)
+              .set({
+                firstName: donor.firstName,
+                lastName: donor.lastName,
+                phone: donor.phone ?? existingUser.phone,
+                updatedAt: new Date(),
+              })
+              .where(eq(users.id, userId)),
+          { userId },
+        );
 
-      if (existingProfile) {
-        donorProfileId = existingProfile.id;
-        await tx
-          .update(donorProfiles)
-          .set({
-            pickupPrivacyLevel: donor.locationPrivacyLevel,
-            updatedAt: new Date(),
-          })
-          .where(eq(donorProfiles.id, donorProfileId));
+        const [existingProfile] = await runDonationDbStep(
+          "donor_profiles.select_by_user",
+          () =>
+            tx
+              .select()
+              .from(donorProfiles)
+              .where(eq(donorProfiles.userId, userId))
+              .limit(1),
+          { userId },
+        );
+
+        if (existingProfile) {
+          donorProfileId = existingProfile.id;
+          await runDonationDbStep(
+            "donor_profiles.update_existing",
+            () =>
+              tx
+                .update(donorProfiles)
+                .set({
+                  pickupPrivacyLevel: donor.locationPrivacyLevel,
+                  updatedAt: new Date(),
+                })
+                .where(eq(donorProfiles.id, donorProfileId)),
+            { donorProfileId },
+          );
+        } else {
+          const [newProfile] = await runDonationDbStep(
+            "donor_profiles.insert",
+            () =>
+              tx
+                .insert(donorProfiles)
+                .values({
+                  userId,
+                  pickupPrivacyLevel: donor.locationPrivacyLevel,
+                  donorType: "individual",
+                })
+                .returning(),
+            { userId },
+          );
+
+          if (!newProfile) {
+            throw new Error("Failed to create donor profile");
+          }
+
+          donorProfileId = newProfile.id;
+
+          await runDonationDbStep(
+            "user_roles.insert_donor",
+            () => tx.insert(userRoles).values({ userId, roleId: DONOR_ROLE_ID }),
+            { userId, roleId: DONOR_ROLE_ID },
+          );
+        }
       } else {
-        const [newProfile] = await tx
-          .insert(donorProfiles)
-          .values({
-            userId,
-            pickupPrivacyLevel: donor.locationPrivacyLevel,
-            donorType: "individual",
-          })
-          .returning();
+        const [newUser] = await runDonationDbStep(
+          "users.insert",
+          () =>
+            tx
+              .insert(users)
+              .values({
+                email: donor.email,
+                phone: donor.phone,
+                firstName: donor.firstName,
+                lastName: donor.lastName,
+                communicationPreference: "email",
+              })
+              .returning(),
+        );
+
+        if (!newUser) {
+          throw new Error("Failed to create user");
+        }
+
+        userId = newUser.id;
+
+        const [newProfile] = await runDonationDbStep(
+          "donor_profiles.insert",
+          () =>
+            tx
+              .insert(donorProfiles)
+              .values({
+                userId,
+                pickupPrivacyLevel: donor.locationPrivacyLevel,
+                donorType: "individual",
+              })
+              .returning(),
+          { userId },
+        );
 
         if (!newProfile) {
           throw new Error("Failed to create donor profile");
         }
 
         donorProfileId = newProfile.id;
-        await tx.insert(userRoles).values({ userId, roleId: DONOR_ROLE_ID });
-      }
-    } else {
-      const [newUser] = await tx
-        .insert(users)
-        .values({
-          email: donor.email,
-          phone: donor.phone,
-          firstName: donor.firstName,
-          lastName: donor.lastName,
-          communicationPreference: "email",
-        })
-        .returning();
 
-      if (!newUser) {
-        throw new Error("Failed to create user");
+        await runDonationDbStep(
+          "user_roles.insert_donor",
+          () => tx.insert(userRoles).values({ userId, roleId: DONOR_ROLE_ID }),
+          { userId, roleId: DONOR_ROLE_ID },
+        );
       }
 
-      userId = newUser.id;
+      const itemIds: string[] = [];
+      const txClient = tx as unknown as ReturnType<typeof getDb>;
 
-      const [newProfile] = await tx
-        .insert(donorProfiles)
-        .values({
-          userId,
-          pickupPrivacyLevel: donor.locationPrivacyLevel,
-          donorType: "individual",
-        })
-        .returning();
+      for (const [index, item] of input.items.entries()) {
+        const isClothing = item.itemKind === "clothing";
 
-      if (!newProfile) {
-        throw new Error("Failed to create donor profile");
+        const [furnitureItem] = await runDonationDbStep(
+          "furniture_items.insert",
+          () =>
+            tx
+              .insert(furnitureItems)
+              .values({
+                donorProfileId,
+                itemKind: item.itemKind,
+                status: "submitted",
+                category: isClothing ? CLOTHING_CATEGORY : item.category,
+                title: isClothing ? undefined : item.title,
+                description: buildDescription(item),
+                condition: item.condition,
+                quantity: item.quantity,
+                metadata: isClothing ? buildClothingMetadata(item) : null,
+                requiresTwoPerson: isClothing
+                  ? false
+                  : (item.requiresTwoPerson ?? false),
+                pickupConstraints: buildPickupConstraints(donor, item),
+                availabilityStart: donor.availabilityStart ?? null,
+                availabilityEnd: donor.availabilityEnd ?? null,
+                addressLine1: donor.addressLine1 ?? null,
+                city: donor.city,
+                state: donor.state,
+                zipCode: donor.zipCode,
+                crossStreet: donor.crossStreet ?? null,
+                locationPrivacyLevel: donor.locationPrivacyLevel,
+              })
+              .returning(),
+          {
+            index,
+            itemKind: item.itemKind,
+            category: isClothing ? CLOTHING_CATEGORY : item.category,
+            clothingType: item.clothingType ?? null,
+            donorProfileId,
+          },
+        );
+
+        if (!furnitureItem) {
+          throw new Error("Failed to create furniture item");
+        }
+
+        itemIds.push(furnitureItem.id);
+
+        await runDonationDbStep(
+          "audit_log.insert",
+          () =>
+            logAuditEvent(txClient, {
+              action: "furniture_item.submitted",
+              entityType: "furniture_item",
+              entityId: furnitureItem.id,
+              newValues: {
+                status: furnitureItem.status,
+                itemKind: furnitureItem.itemKind,
+                category: furnitureItem.category,
+                condition: furnitureItem.condition,
+                zipCode: furnitureItem.zipCode,
+              },
+              metadata: {
+                source: "public_donate_form",
+                photosPending: item.photosPending,
+                batchSize: input.items.length,
+              },
+            }),
+          { furnitureItemId: furnitureItem.id, index },
+        );
       }
 
-      donorProfileId = newProfile.id;
+      const categoryList = input.items
+        .map((item) => itemCategoryLabel(item))
+        .join(", ");
 
-      await tx.insert(userRoles).values({ userId, roleId: DONOR_ROLE_ID });
-    }
+      await runDonationDbStep(
+        "communications.insert",
+        () =>
+          logCommunicationEvent(txClient, {
+            userId,
+            channel: "email",
+            direction: "outbound",
+            templateCode: "donation_received",
+            subject: "Sleepwell donation received",
+            bodyPreview: `Donation submission received with ${input.items.length} item(s): ${categoryList}.`,
+            relatedEntityType: "furniture_item",
+            relatedEntityId: itemIds[0],
+            status: "queued",
+          }),
+        { userId, itemCount: itemIds.length },
+      );
 
-    const itemIds: string[] = [];
-    const txClient = tx as unknown as ReturnType<typeof getDb>;
-
-    for (const item of input.items) {
-      const isClothing = item.itemKind === "clothing";
-
-      const [furnitureItem] = await tx
-        .insert(furnitureItems)
-        .values({
-          donorProfileId,
-          itemKind: item.itemKind,
-          status: "submitted",
-          category: isClothing ? CLOTHING_CATEGORY : item.category,
-          title: isClothing ? undefined : item.title,
-          description: buildDescription(item),
-          condition: item.condition,
-          quantity: item.quantity,
-          metadata: isClothing ? buildClothingMetadata(item) : null,
-          requiresTwoPerson: isClothing ? false : item.requiresTwoPerson ?? false,
-          pickupConstraints: buildPickupConstraints(donor, item),
-          availabilityStart: donor.availabilityStart ?? null,
-          availabilityEnd: donor.availabilityEnd ?? null,
-          addressLine1: donor.addressLine1 ?? null,
-          city: donor.city,
-          state: donor.state,
-          zipCode: donor.zipCode,
-          crossStreet: donor.crossStreet ?? null,
-          locationPrivacyLevel: donor.locationPrivacyLevel,
-        })
-        .returning();
-
-      if (!furnitureItem) {
-        throw new Error("Failed to create furniture item");
-      }
-
-      itemIds.push(furnitureItem.id);
-
-      await logAuditEvent(txClient, {
-        action: "furniture_item.submitted",
-        entityType: "furniture_item",
-        entityId: furnitureItem.id,
-        newValues: {
-          status: furnitureItem.status,
-          itemKind: furnitureItem.itemKind,
-          category: furnitureItem.category,
-          condition: furnitureItem.condition,
-          zipCode: furnitureItem.zipCode,
-        },
-        metadata: {
-          source: "public_donate_form",
-          photosPending: item.photosPending,
-          batchSize: input.items.length,
-        },
-      });
-    }
-
-    const categoryList = input.items.map((item) => itemCategoryLabel(item)).join(", ");
-
-    await logCommunicationEvent(txClient, {
-      userId,
-      channel: "email",
-      direction: "outbound",
-      templateCode: "donation_received",
-      subject: "Sleepwell donation received",
-      bodyPreview: `Donation submission received with ${input.items.length} item(s): ${categoryList}.`,
-      relatedEntityType: "furniture_item",
-      relatedEntityId: itemIds[0],
-      status: "queued",
+      return {
+        userId,
+        itemIds,
+        summaryItems: toDonationSummaryItems(input.items),
+        donorName: `${donor.firstName} ${donor.lastName}`,
+      };
     });
-
-    return {
-      userId,
-      itemIds,
-      summaryItems: toDonationSummaryItems(input.items),
-      donorName: `${donor.firstName} ${donor.lastName}`,
-    };
-  });
+  } catch (error) {
+    logDonationError("createDonationFromPublicForm transaction failed", error, {
+      itemCount: input.items.length,
+    });
+    throw error;
+  }
 }

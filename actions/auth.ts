@@ -12,6 +12,43 @@ function getAuthRedirectUrl(): string {
   return `${appUrl.replace(/\/$/, "")}/auth/callback`;
 }
 
+export async function registerWithPassword(formData: FormData) {
+  const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  const password = String(formData.get("password") ?? "");
+  const confirmPassword = String(formData.get("confirmPassword") ?? "");
+
+  if (!email || !password) {
+    redirect("/register?error=missing_fields");
+  }
+
+  if (password.length < 8) {
+    redirect("/register?error=weak_password");
+  }
+
+  if (password !== confirmPassword) {
+    redirect("/register?error=password_mismatch");
+  }
+
+  const supabase = await createClient();
+  const { error } = await supabase.auth.signUp({
+    email,
+    password,
+    options: {
+      emailRedirectTo: getAuthRedirectUrl(),
+    },
+  });
+
+  if (error) {
+    const message = error.message.toLowerCase();
+    if (message.includes("already registered") || message.includes("already exists")) {
+      redirect("/register?error=email_taken");
+    }
+    redirect("/register?error=signup_failed");
+  }
+
+  redirect("/register?message=check_email");
+}
+
 export async function sendMagicLink(formData: FormData) {
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
 

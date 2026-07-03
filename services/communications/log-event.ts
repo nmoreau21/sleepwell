@@ -1,5 +1,6 @@
 import { getDb } from "@/db";
 import { communications } from "@/db/schema/communications";
+import { logDonationError } from "@/lib/logging/donation-submission";
 
 type DbClient = ReturnType<typeof getDb>;
 
@@ -18,16 +19,26 @@ export async function logCommunicationEvent(
     status?: "queued" | "sent" | "delivered" | "failed";
   },
 ) {
-  await db.insert(communications).values({
-    userId: event.userId ?? null,
-    sentByUserId: event.sentByUserId ?? null,
-    channel: event.channel,
-    direction: event.direction,
-    templateCode: event.templateCode ?? null,
-    subject: event.subject ?? null,
-    bodyPreview: event.bodyPreview ?? null,
-    relatedEntityType: event.relatedEntityType ?? null,
-    relatedEntityId: event.relatedEntityId ?? null,
-    status: event.status ?? "queued",
-  });
+  try {
+    await db.insert(communications).values({
+      userId: event.userId ?? null,
+      sentByUserId: event.sentByUserId ?? null,
+      channel: event.channel,
+      direction: event.direction,
+      templateCode: event.templateCode ?? null,
+      subject: event.subject ?? null,
+      bodyPreview: event.bodyPreview ?? null,
+      relatedEntityType: event.relatedEntityType ?? null,
+      relatedEntityId: event.relatedEntityId ?? null,
+      status: event.status ?? "queued",
+    });
+  } catch (error) {
+    logDonationError("logCommunicationEvent insert failed", error, {
+      channel: event.channel,
+      templateCode: event.templateCode ?? null,
+      relatedEntityType: event.relatedEntityType ?? null,
+      relatedEntityId: event.relatedEntityId ?? null,
+    });
+    throw error;
+  }
 }

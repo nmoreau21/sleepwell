@@ -1,22 +1,21 @@
 import Link from "next/link";
 
-import { sendMagicLink } from "@/actions/auth";
+import { registerWithPassword } from "@/actions/auth";
 
 const ERROR_MESSAGES: Record<string, string> = {
-  missing_email: "Enter your email address.",
-  send_failed: "Could not send the sign-in link. Try again or contact support.",
-  auth: "Sign-in failed. Request a new magic link.",
-  forbidden: "This account is not authorized for admin access.",
-  not_provisioned:
-    "No coordinator account exists for this email. Contact your Sleepwell administrator.",
+  missing_fields: "Enter your email and password.",
+  weak_password: "Password must be at least 8 characters.",
+  password_mismatch: "Passwords do not match.",
+  email_taken: "An account with this email already exists. Sign in instead.",
+  signup_failed: "Could not create your account. Try again or contact support.",
 };
 
 const INFO_MESSAGES: Record<string, string> = {
-  check_email: "Check your email for a sign-in link.",
-  signed_out: "You have been signed out.",
+  check_email:
+    "Check your email to confirm your account, then sign in. Admin access still requires coordinator provisioning.",
 };
 
-export default async function LoginPage({
+export default async function RegisterPage({
   searchParams,
 }: Readonly<{
   searchParams: Promise<{ error?: string; message?: string }>;
@@ -32,11 +31,11 @@ export default async function LoginPage({
           ← Sleepwell
         </Link>
         <h1 className="mt-4 text-2xl font-semibold tracking-tight">
-          Coordinator sign in
+          Coordinator registration
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Enter your email to receive a one-time sign-in link. Access is limited
-          to authorized Sleepwell coordinators.
+          Create an account with email and password. After email confirmation,
+          authorized coordinators can access the admin dashboard.
         </p>
       </div>
 
@@ -58,7 +57,7 @@ export default async function LoginPage({
         </div>
       )}
 
-      <form action={sendMagicLink} className="space-y-4">
+      <form action={registerWithPassword} className="space-y-4">
         <div>
           <label htmlFor="email" className="block text-sm font-medium">
             Email
@@ -73,18 +72,46 @@ export default async function LoginPage({
             placeholder="coordinator@example.org"
           />
         </div>
+        <div>
+          <label htmlFor="password" className="block text-sm font-medium">
+            Password
+          </label>
+          <input
+            id="password"
+            name="password"
+            type="password"
+            autoComplete="new-password"
+            required
+            minLength={8}
+            className="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none ring-ring focus-visible:ring-2"
+          />
+        </div>
+        <div>
+          <label htmlFor="confirmPassword" className="block text-sm font-medium">
+            Confirm password
+          </label>
+          <input
+            id="confirmPassword"
+            name="confirmPassword"
+            type="password"
+            autoComplete="new-password"
+            required
+            minLength={8}
+            className="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none ring-ring focus-visible:ring-2"
+          />
+        </div>
         <button
           type="submit"
           className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90"
         >
-          Send magic link
+          Create account
         </button>
       </form>
 
       <p className="mt-6 text-center text-sm text-muted-foreground">
-        Need an account?{" "}
-        <Link href="/register" className="font-medium text-foreground hover:underline">
-          Register with email and password
+        Already have an account?{" "}
+        <Link href="/login" className="font-medium text-foreground hover:underline">
+          Sign in
         </Link>
       </p>
     </div>
